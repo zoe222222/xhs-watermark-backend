@@ -222,13 +222,34 @@ def fetch_images(raw_input: str) -> dict:
 
 
 def proxy_image(url: str, timeout: int = 20) -> Tuple[bytes, str]:
-    """代理下载一张图片，返回 (图片字节, content-type)。"""
-    req = urllib.request.Request(url, headers={
-        "User-Agent": _UA,
-        "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-        "Referer": "https://www.xiaohongshu.com/",
-    })
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        data = resp.read()
-        ct = resp.headers.get("Content-Type", "image/jpeg")
-    return data, ct
+    """代理下载一张图片，返回 (图片字节, content-type)。使用 curl 避免被拦截。"""
+    cmd = [
+        "curl", "-sL",
+        "--max-time", str(timeout),
+        "-H", f"User-Agent: {_UA}",
+        "-H", "Accept: image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        "-H", "Referer: https://www.xiaohongshu.com/",
+        "-D", "-",  # 输出响应头到 stdout
+        url,
+    ]
+    result = subprocess.run(cmd, capture_output=True, timeout=timeout + 5)
+    if result.returncode != 0:
+        raise RuntimeError(f"curl 失败: {result.stderr.decode('utf-8', errors='replace')[:200]}")
+
+    # 分离响应头和响应体
+    raw = result.stdout
+    # 找到头部和体之间的空行 \r\n\r\n
+    sep = raw.find(b"\r\n\r\n")
+    if sep == -1:
+        raise RuntimeError("无法解析响应头")
+    headers_raw = raw[:sep].decode("utf-8", errors="replace")
+    body = raw[sep + 4:]
+
+    # 从响应头提取 Content-Type
+    ct = "image/jpeg"
+    for line in headers_raw.splitlines():
+        if line.lower().startswith("content-type:"):
+            ct = line.split(":", 1)[1].strip()
+            break
+
+    return body, ct

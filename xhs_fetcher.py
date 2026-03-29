@@ -118,12 +118,12 @@ def _normalise_url(url: str) -> str:
     # 匹配新格式：含 notes_pre_post/ 子路径
     m = re.search(r'(notes_pre_post/[0-9a-zA-Z]+)$', url)
     if m:
-        return f"http://ci.xiaohongshu.com/{m.group(1)}"
+        return f"https://ci.xiaohongshu.com/{m.group(1)}"
 
     # 匹配旧格式：末尾直接是图片 ID
     image_id = url.rsplit("/", 1)[-1]
     if image_id and re.match(r'^[0-9a-zA-Z]{20,}$', image_id):
-        return f"http://ci.xiaohongshu.com/{image_id}"
+        return f"https://ci.xiaohongshu.com/{image_id}"
 
     return url
 

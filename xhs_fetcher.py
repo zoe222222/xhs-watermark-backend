@@ -229,27 +229,21 @@ def proxy_image(url: str, timeout: int = 20) -> Tuple[bytes, str]:
         "-H", f"User-Agent: {_UA}",
         "-H", "Accept: image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
         "-H", "Referer: https://www.xiaohongshu.com/",
-        "-D", "-",  # 输出响应头到 stdout
         url,
     ]
     result = subprocess.run(cmd, capture_output=True, timeout=timeout + 5)
     if result.returncode != 0:
         raise RuntimeError(f"curl 失败: {result.stderr.decode('utf-8', errors='replace')[:200]}")
 
-    # 分离响应头和响应体
-    raw = result.stdout
-    # 找到头部和体之间的空行 \r\n\r\n
-    sep = raw.find(b"\r\n\r\n")
-    if sep == -1:
-        raise RuntimeError("无法解析响应头")
-    headers_raw = raw[:sep].decode("utf-8", errors="replace")
-    body = raw[sep + 4:]
+    data = result.stdout
+    if not data:
+        raise RuntimeError("图片内容为空")
 
-    # 从响应头提取 Content-Type
+    # 根据文件头判断图片类型
     ct = "image/jpeg"
-    for line in headers_raw.splitlines():
-        if line.lower().startswith("content-type:"):
-            ct = line.split(":", 1)[1].strip()
-            break
+    if data[:4] == b'\x89PNG':
+        ct = "image/png"
+    elif data[:4] == b'RIFF' and data[8:12] == b'WEBP':
+        ct = "image/webp"
 
-    return body, ct
+    return data, ct

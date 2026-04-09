@@ -7,8 +7,21 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from io import BytesIO
 from pathlib import Path
 from urllib import error
+from urllib.parse import urlparse
 
 from xhs_fetcher import fetch_images, proxy_image
+
+# 允许代理的图片域名白名单（防止 SSRF）
+_ALLOWED_IMG_HOSTS = {
+    "ci.xiaohongshu.com",
+    "sns-webpic-qc.xhscdn.com",
+    "sns-img-qc.xhscdn.com",
+    "sns-img-hw.xhscdn.com",
+    "sns-img-bd.xhscdn.com",
+    "xhscdn.com",
+}
+
+MAX_BODY_SIZE = 20 * 1024 * 1024  # 20 MB，防止超大请求撑爆内存
 
 # local_model 延迟导入：只有真正调用去水印时才加载，避免启动时报错
 _LocalWatermarkModel = None
@@ -109,7 +122,11 @@ class Handler(BaseHTTPRequestHandler):
         url_path = path
         if url_path in ("/", ""):
             url_path = "/去水印.html"
-        file_path = STATIC_ROOT / url_path.lstrip("/")
+        file_path = (STATIC_ROOT / url_path.lstrip("/")).resolve()
+        # 路径穿越防护：确保最终路径在 STATIC_ROOT 内
+        if not str(file_path).startswith(str(STATIC_ROOT.resolve())):
+            json_response(self, 403, {"ok": False, "error": "Forbidden"})
+            return
         if file_path.exists() and file_path.is_file():
             mime, _ = mimetypes.guess_type(str(file_path))
             body = file_path.read_bytes()
@@ -129,7 +146,22 @@ class Handler(BaseHTTPRequestHandler):
             json_response(self, 400, {"ok": False, "error": "缺少 url 参数"})
             return
         target_url = urllib.parse.unquote(urls[0])
-        fmt = qs.get("fmt", [""])[0].lower()  # fmt=png 强制转换为 PNG
+
+        # SSRF 防护：只允许白名单域名
+        try:
+            parsed_host = urlparse(target_url).hostname or ""
+        except Exception:
+            parsed_host = ""
+        allowed = any(
+            parsed_host == h or parsed_host.endswith("." + h)
+            for h in _ALLOWED_IMG_HOSTS
+        )
+        if not allowed:
+            json_response(self, 403, {"ok": False, "error": "不允许的图片域名"})
+            return
+
+        fmt   = qs.get("fmt",   [""])[0].lower()   # fmt=png  → 转为 PNG
+        thumb = qs.get("thumb", [""])[0] == "1"     # thumb=1  → 缩略图
 
         try:
             data, content_type = proxy_image(target_url)
@@ -137,8 +169,23 @@ class Handler(BaseHTTPRequestHandler):
             json_response(self, 502, {"ok": False, "error": f"图片下载失败: {e}"})
             return
 
-        # fmt=png: 强制转换为 PNG（解决 iOS saveImageToPhotosAlbum 不支持 WebP 的问题）
-        if fmt == "png" and content_type != "image/png":
+        # 缩略图模式：等比缩放到宽 800px，JPEG q=82，大幅减小体积加快加载
+        if thumb:
+            try:
+                from PIL import Image
+                img = Image.open(BytesIO(data)).convert("RGB")
+                w, h = img.size
+                if w > 800:
+                    img = img.resize((800, int(h * 800 / w)), Image.LANCZOS)
+                buf = BytesIO()
+                img.save(buf, format="JPEG", quality=82, optimize=True)
+                data = buf.getvalue()
+                content_type = "image/jpeg"
+            except Exception:
+                pass  # 转换失败则返回原始数据
+
+        # fmt=png：强制转换为 PNG（解决 iOS saveImageToPhotosAlbum 不支持 WebP 的问题）
+        elif fmt == "png" and content_type != "image/png":
             try:
                 from PIL import Image
                 img = Image.open(BytesIO(data)).convert("RGB")
@@ -176,7 +223,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_fetch_xhs(self):
         try:
-            length = int(self.headers.get("Content-Length", "0"))
+            length = min(int(self.headers.get("Content-Length", "0")), MAX_BODY_SIZE)
             raw = self.rfile.read(length)
             payload = json.loads(raw.decode("utf-8"))
             link = payload.get("link", "").strip()
@@ -194,7 +241,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_remove_watermark(self):
         try:
-            length = int(self.headers.get("Content-Length", "0"))
+            length = min(int(self.headers.get("Content-Length", "0")), MAX_BODY_SIZE)
             raw = self.rfile.read(length)
             payload = json.loads(raw.decode("utf-8"))
             image_b64 = payload.get("imageBase64", "")

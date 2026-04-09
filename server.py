@@ -129,8 +129,7 @@ class Handler(BaseHTTPRequestHandler):
             json_response(self, 400, {"ok": False, "error": "缺少 url 参数"})
             return
         target_url = urllib.parse.unquote(urls[0])
-        filename_list = qs.get("filename", [])
-        filename = filename_list[0] if filename_list else "image.jpg"
+        fmt = qs.get("fmt", [""])[0].lower()  # fmt=png 强制转换为 PNG
 
         try:
             data, content_type = proxy_image(target_url)
@@ -138,14 +137,25 @@ class Handler(BaseHTTPRequestHandler):
             json_response(self, 502, {"ok": False, "error": f"图片下载失败: {e}"})
             return
 
+        # fmt=png: 强制转换为 PNG（解决 iOS saveImageToPhotosAlbum 不支持 WebP 的问题）
+        if fmt == "png" and content_type != "image/png":
+            try:
+                from PIL import Image
+                img = Image.open(BytesIO(data)).convert("RGB")
+                buf = BytesIO()
+                img.save(buf, format="PNG")
+                data = buf.getvalue()
+                content_type = "image/png"
+            except Exception:
+                pass  # 转换失败则返回原始数据
+
+        filename = "image.png" if content_type == "image/png" else "image.jpg"
+
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header(
-            "Content-Disposition",
-            f'attachment; filename="{filename}"',
-        )
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
         self.end_headers()
         self.wfile.write(data)
 

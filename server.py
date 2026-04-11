@@ -2,12 +2,16 @@ import base64
 import json
 import mimetypes
 import os
+import threading
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from pathlib import Path
 from urllib import error
 from urllib.parse import urlparse
+
+# 最多同时 3 个线程做 Pillow 图片转换，防止 OOM
+_IMG_SEMAPHORE = threading.Semaphore(3)
 
 from xhs_fetcher import fetch_images, proxy_image
 
@@ -171,30 +175,32 @@ class Handler(BaseHTTPRequestHandler):
 
         # 缩略图模式：等比缩放到宽 800px，JPEG q=82，大幅减小体积加快加载
         if thumb:
-            try:
-                from PIL import Image
-                img = Image.open(BytesIO(data)).convert("RGB")
-                w, h = img.size
-                if w > 800:
-                    img = img.resize((800, int(h * 800 / w)), Image.LANCZOS)
-                buf = BytesIO()
-                img.save(buf, format="JPEG", quality=82, optimize=True)
-                data = buf.getvalue()
-                content_type = "image/jpeg"
-            except Exception:
-                pass  # 转换失败则返回原始数据
+            with _IMG_SEMAPHORE:
+                try:
+                    from PIL import Image
+                    img = Image.open(BytesIO(data)).convert("RGB")
+                    w, h = img.size
+                    if w > 800:
+                        img = img.resize((800, int(h * 800 / w)), Image.LANCZOS)
+                    buf = BytesIO()
+                    img.save(buf, format="JPEG", quality=82, optimize=True)
+                    data = buf.getvalue()
+                    content_type = "image/jpeg"
+                except Exception:
+                    pass  # 转换失败则返回原始数据
 
         # fmt=png：强制转换为 PNG（解决 iOS saveImageToPhotosAlbum 不支持 WebP 的问题）
         elif fmt == "png" and content_type != "image/png":
-            try:
-                from PIL import Image
-                img = Image.open(BytesIO(data)).convert("RGB")
-                buf = BytesIO()
-                img.save(buf, format="PNG")
-                data = buf.getvalue()
-                content_type = "image/png"
-            except Exception:
-                pass  # 转换失败则返回原始数据
+            with _IMG_SEMAPHORE:
+                try:
+                    from PIL import Image
+                    img = Image.open(BytesIO(data)).convert("RGB")
+                    buf = BytesIO()
+                    img.save(buf, format="PNG")
+                    data = buf.getvalue()
+                    content_type = "image/png"
+                except Exception:
+                    pass  # 转换失败则返回原始数据
 
         filename = "image.png" if content_type == "image/png" else "image.jpg"
 
